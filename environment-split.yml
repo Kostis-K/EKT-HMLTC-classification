@@ -1,0 +1,14 @@
+name: ekt-split-py311
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - pip
+  - pip:
+      - iterative-stratification
+      - liac-arff
