@@ -10,5 +10,5 @@ dependencies:
   - scikit-learn
   - pip
   - pip:
-      - iterative-stratification
+      - scikit-multilearn
       - liac-arff
