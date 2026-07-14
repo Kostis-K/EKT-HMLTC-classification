@@ -12,7 +12,12 @@ from typing import Iterable
 import numpy as np
 from skmultilearn.model_selection import IterativeStratification
 
-from ekt_hmltc.preprocessing.taxonomy import expand_with_ancestors, load_parent_map
+from ekt_hmltc.preprocessing.filter_annotations import PROJECTED_LABEL_FIELD, RAW_LABEL_FIELD, SELECTED_LABEL_FIELD
+from ekt_hmltc.preprocessing.taxonomy import (
+    expand_with_ancestors,
+    load_parent_map,
+    remove_redundant_ancestors,
+)
 
 
 DEFAULT_SPLIT_NAMES = ("train", "dev", "test")
@@ -26,6 +31,7 @@ class SplitResult:
     split_indices: dict[str, np.ndarray]
     ratios: tuple[float, ...]
     label_projection: str
+    label_field: str
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -36,28 +42,43 @@ def load_jsonl(path: Path) -> list[dict]:
             if not line:
                 continue
             record = json.loads(line)
-            if not isinstance(record.get("ekt_subjects"), list):
-                raise ValueError(f"Record at line {line_number} has no list ekt_subjects field.")
-            if not record["ekt_subjects"]:
-                raise ValueError(f"Record at line {line_number} has an empty ekt_subjects list.")
+            if not isinstance(record.get(RAW_LABEL_FIELD), list):
+                raise ValueError(f"Record at line {line_number} has no list {RAW_LABEL_FIELD} field.")
+            if not record[RAW_LABEL_FIELD]:
+                raise ValueError(f"Record at line {line_number} has an empty {RAW_LABEL_FIELD} list.")
             records.append(record)
     if not records:
         raise ValueError(f"No records found in {path}.")
     return records
 
 
-def get_record_labels(record: dict, parent_by_label: dict[str, str] | None) -> set[str]:
+def get_record_labels(
+    record: dict,
+    label_field: str,
+    parent_by_label: dict[str, str] | None,
+) -> set[str]:
+    labels = record.get(label_field)
+    if isinstance(labels, list) and labels:
+        return set(labels)
+
     if parent_by_label is None:
-        return set(record["ekt_subjects"])
-    return expand_with_ancestors(record["ekt_subjects"], parent_by_label)
+        return set(record[RAW_LABEL_FIELD])
+
+    selected_labels = record.get(SELECTED_LABEL_FIELD)
+    if not isinstance(selected_labels, list) or not selected_labels:
+        selected_labels = sorted(remove_redundant_ancestors(record[RAW_LABEL_FIELD], parent_by_label))
+    return expand_with_ancestors(selected_labels, parent_by_label)
 
 
 def build_label_matrix(
     records: list[dict],
     taxonomy_path: Path | None = None,
+    label_field: str = PROJECTED_LABEL_FIELD,
 ) -> tuple[list[str], np.ndarray, str]:
     parent_by_label = load_parent_map(taxonomy_path) if taxonomy_path is not None else None
-    projected_record_labels = [get_record_labels(record, parent_by_label) for record in records]
+    projected_record_labels = [
+        get_record_labels(record, label_field=label_field, parent_by_label=parent_by_label) for record in records
+    ]
     labels = sorted({label for record_labels in projected_record_labels for label in record_labels})
     label_to_index = {label: index for index, label in enumerate(labels)}
     matrix = np.zeros((len(records), len(labels)), dtype=np.int8)
@@ -66,7 +87,12 @@ def build_label_matrix(
         for label in record_labels:
             matrix[row_index, label_to_index[label]] = 1
 
-    label_projection = "direct_plus_ancestors" if taxonomy_path is not None else "direct"
+    if label_field == PROJECTED_LABEL_FIELD:
+        label_projection = PROJECTED_LABEL_FIELD
+    elif taxonomy_path is not None:
+        label_projection = f"{label_field}_plus_ancestors"
+    else:
+        label_projection = label_field
     return labels, matrix, label_projection
 
 
@@ -94,10 +120,17 @@ def make_split(
     order: int,
     seed: int | None,
     taxonomy_path: Path | None = None,
+    label_field: str = PROJECTED_LABEL_FIELD,
     split_names: tuple[str, ...] = DEFAULT_SPLIT_NAMES,
 ) -> SplitResult:
-    labels, matrix, label_projection = build_label_matrix(records, taxonomy_path=taxonomy_path)
+    labels, matrix, label_projection = build_label_matrix(
+        records,
+        taxonomy_path=taxonomy_path,
+        label_field=label_field,
+    )
     features = np.zeros((len(records), 1), dtype=np.int8)
+    if seed is not None:
+        np.random.seed(seed)
 
     stratifier = IterativeStratification(
         n_splits=len(ratios),
@@ -119,6 +152,7 @@ def make_split(
         split_indices=dict(zip(split_names, fold_indices, strict=True)),
         ratios=ratios,
         label_projection=label_projection,
+        label_field=label_field,
     )
 
 
@@ -191,6 +225,7 @@ def write_summary(result: SplitResult, diagnostics: dict, output_path: Path, ord
         "labels": len(result.labels),
         "order": order,
         "seed": seed,
+        "label_field": result.label_field,
         "label_projection": result.label_projection,
         "ratios": dict(zip(result.split_indices.keys(), result.ratios, strict=True)),
         "split_sizes": split_sizes,
@@ -223,6 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--order", type=int, default=1, choices=(1, 2))
     parser.add_argument("--seed", type=int, default=16)
     parser.add_argument("--taxonomy", type=Path, default=Path("data/EKTSubjects_new.xml"))
+    parser.add_argument("--label-field", default=PROJECTED_LABEL_FIELD)
     parser.add_argument("--direct-labels-only", action="store_true")
     return parser.parse_args()
 
@@ -232,7 +268,14 @@ def main() -> None:
     ratios = normalize_ratios(args.ratios)
     records = shuffle_records(load_jsonl(args.input), args.seed)
     taxonomy_path = None if args.direct_labels_only else args.taxonomy
-    result = make_split(records, ratios=ratios, order=args.order, seed=args.seed, taxonomy_path=taxonomy_path)
+    result = make_split(
+        records,
+        ratios=ratios,
+        order=args.order,
+        seed=args.seed,
+        taxonomy_path=taxonomy_path,
+        label_field=args.label_field,
+    )
     write_split(result, args.output_dir, order=args.order, seed=args.seed)
 
     summary = json.loads((args.output_dir / "summary.json").read_text(encoding="utf-8"))

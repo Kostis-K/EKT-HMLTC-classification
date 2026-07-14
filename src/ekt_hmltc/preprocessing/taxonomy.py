@@ -1,4 +1,4 @@
-"""Helpers for reading the EKT/ThetaEPE SKOS taxonomy."""
+"""Helpers for reading and using the EKT/ThetaEPE SKOS taxonomy."""
 
 from __future__ import annotations
 
@@ -48,8 +48,28 @@ def ancestors_of(label: str, parent_by_label: dict[str, str]) -> list[str]:
     return ancestors
 
 
-def expand_with_ancestors(labels: list[str], parent_by_label: dict[str, str]) -> set[str]:
+def expand_with_ancestors(labels: list[str] | set[str], parent_by_label: dict[str, str]) -> set[str]:
     expanded = set(labels)
     for label in labels:
         expanded.update(ancestors_of(label, parent_by_label))
     return expanded
+
+
+def remove_redundant_ancestors(labels: list[str] | set[str], parent_by_label: dict[str, str]) -> set[str]:
+    """Keep the most specific labels selected for one record.
+
+    Human annotations are not forced to be leaves: an internal node can be a
+    deliberate annotation. We remove a label only when a descendant of that same
+    label is also present in the same record.
+    """
+
+    unique_labels = list(dict.fromkeys(labels))
+    label_set = set(unique_labels)
+    redundant_ancestors: set[str] = set()
+
+    for label in unique_labels:
+        for ancestor in ancestors_of(label, parent_by_label):
+            if ancestor in label_set:
+                redundant_ancestors.add(ancestor)
+
+    return {label for label in unique_labels if label not in redundant_ancestors}

@@ -7,12 +7,14 @@ import json
 from pathlib import Path
 
 from ekt_hmltc.preprocessing.filter_annotations import (
+    PROJECTED_LABEL_FIELD,
     filter_by_min_label_support,
     load_jsonl,
     write_jsonl,
     write_label_support,
     write_summary as write_filter_summary,
 )
+from ekt_hmltc.stratification.adaptive_priority_split import make_adaptive_split
 from ekt_hmltc.stratification.human_annotations_split import (
     make_split,
     normalize_ratios,
@@ -30,15 +32,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ratios", type=float, nargs=3, default=(0.8, 0.1, 0.1), metavar=("TRAIN", "DEV", "TEST"))
     parser.add_argument("--order", type=int, default=1, choices=(1, 2))
     parser.add_argument("--seed", type=int, default=16)
+    parser.add_argument("--splitter", choices=("iterative", "adaptive"), default="adaptive")
     parser.add_argument("--prepared-output", type=Path, default=Path("data/processed/human_annotations_min50.jsonl"))
     parser.add_argument("--preprocess-report-dir", type=Path, default=Path("outputs/preprocessing/human_min50"))
-    parser.add_argument("--split-output-dir", type=Path, default=Path("outputs/subsets/human_min50_order1_80_10_10_seed16"))
+    parser.add_argument("--split-output-dir", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     ratios = normalize_ratios(args.ratios)
+    split_output_dir = args.split_output_dir
+    if split_output_dir is None:
+        split_output_dir = Path(f"outputs/subsets/human_min50_{args.splitter}_80_10_10_seed{args.seed}")
 
     records = load_jsonl(args.input)
     taxonomy_path = None if args.direct_support_only else args.taxonomy
@@ -49,18 +55,46 @@ def main() -> None:
     write_filter_summary(filter_result, args.preprocess_report_dir / "summary.json", args.min_support)
 
     shuffled_records = shuffle_records(filter_result.kept_records, args.seed)
-    split_result = make_split(
-        shuffled_records,
-        ratios=ratios,
-        order=args.order,
-        seed=args.seed,
-        taxonomy_path=taxonomy_path,
-    )
-    write_split(split_result, args.split_output_dir, order=args.order, seed=args.seed)
+    adaptive_diagnostics = None
+    if args.splitter == "adaptive":
+        split_result, adaptive_diagnostics = make_adaptive_split(
+            shuffled_records,
+            ratios=ratios,
+            seed=args.seed,
+            taxonomy_path=None,
+            label_field=PROJECTED_LABEL_FIELD,
+            split_names=("train", "dev", "test"),
+        )
+    else:
+        split_result = make_split(
+            shuffled_records,
+            ratios=ratios,
+            order=args.order,
+            seed=args.seed,
+            label_field=PROJECTED_LABEL_FIELD,
+        )
+    write_split(split_result, split_output_dir, order=args.order, seed=args.seed)
+
+    preprocessing_summary = json.loads((args.preprocess_report_dir / "summary.json").read_text(encoding="utf-8"))
+    split_summary_path = split_output_dir / "summary.json"
+    split_summary = json.loads(split_summary_path.read_text(encoding="utf-8"))
+    split_summary["splitter"] = args.splitter
+    if adaptive_diagnostics is not None:
+        split_summary["adaptive_priority"] = {
+            "target_subset_sizes": adaptive_diagnostics.target_subset_sizes,
+            "actual_subset_sizes": adaptive_diagnostics.actual_subset_sizes,
+            "assignments_from_priority": adaptive_diagnostics.assignments_from_priority,
+            "assignments_from_fill": adaptive_diagnostics.assignments_from_fill,
+        }
+    split_summary["preprocessing"] = preprocessing_summary
+    split_summary["records_before_filtering"] = preprocessing_summary["input_records"]
+    split_summary["records_after_filtering"] = preprocessing_summary["kept_records"]
+    split_summary["dropped_records"] = preprocessing_summary["dropped_records"]
+    split_summary_path.write_text(json.dumps(split_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     pipeline_summary = {
-        "preprocessing": json.loads((args.preprocess_report_dir / "summary.json").read_text(encoding="utf-8")),
-        "split": json.loads((args.split_output_dir / "summary.json").read_text(encoding="utf-8")),
+        "preprocessing": preprocessing_summary,
+        "split": split_summary,
     }
     print(json.dumps(pipeline_summary, ensure_ascii=False, indent=2))
 
