@@ -108,10 +108,12 @@ def normalize_ratios(ratios: Iterable[float]) -> tuple[float, ...]:
     normalized = tuple(float(ratio) for ratio in ratios)
     if len(normalized) != 3:
         raise ValueError("Exactly three ratios are expected: train dev test.")
-    if any(ratio <= 0 for ratio in normalized):
-        raise ValueError("Ratios must be positive.")
+    if any(ratio <= 0 or ratio >= 1 for ratio in normalized):
+        raise ValueError("Ratios must be decimal values between 0 and 1, for example: 0.8 0.1 0.1.")
     total = sum(normalized)
-    return tuple(ratio / total for ratio in normalized)
+    if not np.isclose(total, 1.0):
+        raise ValueError(f"Ratios must sum to 1.0. Got {total:.12g} from {normalized}.")
+    return normalized
 
 
 def make_split(
